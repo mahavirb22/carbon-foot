@@ -1,0 +1,8 @@
+{
+  "name": "carbon-footprint-monorepo",
+  "version": "1.2.0",
+  "private": true,
+  "scripts": {
+    "build": "npm --prefix frontend install && npm --prefix frontend run build && mv frontend/dist ./dist"
+  }
+}
