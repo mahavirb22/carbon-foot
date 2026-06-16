@@ -13,6 +13,12 @@ import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+# Add backend directory to sys.path so 'app' package is importable when running directly
+backend_dir = Path(__file__).resolve().parent.parent
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
+
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
