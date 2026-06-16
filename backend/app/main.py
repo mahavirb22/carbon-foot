@@ -72,6 +72,29 @@ def _configure_logging() -> None:
     root.setLevel(logging.INFO)
 
 
+
+class VercelPathRewriterMiddleware:
+    """ASGI middleware to prepend '/api' to paths on Vercel.
+
+    Vercel Services routePrefix '/api' strips the prefix before forwarding
+    requests to the backend. This middleware restores the '/api' prefix so
+    FastAPI's routers (which expect '/api') match correctly.
+    """
+
+    def __init__(self, app: FastAPI) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] == "http":
+            import os
+            path = scope.get("path", "")
+            if os.environ.get("VERCEL") and not path.startswith("/api"):
+                scope["path"] = f"/api{path}"
+                if "raw_path" in scope:
+                    scope["raw_path"] = b"/api" + scope["raw_path"]
+        await self.app(scope, receive, send)
+
+
 def create_app() -> FastAPI:
     """Build the FastAPI application: middleware, routers, and SPA mount."""
     _configure_logging()
@@ -156,6 +179,8 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(calculate.router)
     app.include_router(entries.router)
+
+    app.add_middleware(VercelPathRewriterMiddleware)
 
     _mount_spa(app)
     return app
