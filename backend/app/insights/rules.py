@@ -1,0 +1,155 @@
+"""Deterministic, rule-based insight engine.
+
+This module is the reliability backbone of the platform's "Reduce" pillar: it
+operates entirely offline with zero external dependencies, guaranteeing the
+platform can always deliver concrete, personalised advice even when Gemini is
+unavailable, rate-limited, or explicitly disabled. Being pure and stateless
+makes it straightforward to unit-test.
+
+Strategy: rank the user's emission categories from largest to smallest and
+generate targeted actions for the most impactful contributors, each with a
+quantified annual saving estimate.
+"""
+
+from __future__ import annotations
+
+from app.carbon import factors
+from app.models import CarbonInput, FootprintResult, InsightsResponse, Recommendation
+
+# Achievable reduction fractions behind each recommendation's savings estimate.
+# These are deliberately conservative round numbers suitable for awareness-level guidance.
+_FLIGHT_REDUCTION_SHARE = 0.5  # reduce/combine flights → roughly halve aviation
+_HOME_ENERGY_REDUCTION_SHARE = 0.33  # green tariff + insulation → ~one third
+_CONSUMPTION_REDUCTION_SHARE = 0.25  # durable/second-hand goods, less landfill
+_GENERIC_TRANSPORT_REDUCTION_SHARE = 0.2  # carpooling/transit for routine journeys
+
+# Diet types ordered from highest to lowest annual food-production footprint.
+_DIET_LADDER = [
+    factors.DietType.HEAVY_MEAT,
+    factors.DietType.MEDIUM_MEAT,
+    factors.DietType.LOW_MEAT,
+    factors.DietType.PESCATARIAN,
+    factors.DietType.VEGETARIAN,
+    factors.DietType.VEGAN,
+]
+
+
+def _transport_recommendation(data: CarbonInput, amount: float) -> Recommendation | None:
+    """Build a transport recommendation targeting the largest sub-source."""
+    t = data.transport
+    flights_km = (
+        t.short_haul_flights_per_year * factors.SHORT_HAUL_TRIP_KM
+        + t.long_haul_flights_per_year * factors.LONG_HAUL_TRIP_KM
+    )
+    car_km_year = t.car_km_per_week * factors.WEEKS_PER_YEAR
+    car_emissions = car_km_year * factors.CAR_FACTORS_PER_KM[t.car_fuel]
+    flying = t.short_haul_flights_per_year + t.long_haul_flights_per_year > 0
+    # Target whichever sub-source dominates: aviation or driving.
+    if flying and flights_km * factors.FLIGHT_LONG_HAUL_PER_KM > car_emissions:
+        return Recommendation(
+            category="transport",
+            action="Replace one or more flights per year with rail or video calls, "
+            "and combine trips to halve your aviation emissions.",
+            estimated_annual_savings_kg=round(_FLIGHT_REDUCTION_SHARE * amount, 2),
+        )
+    if t.car_km_per_week > 0 and t.car_fuel != factors.CarFuel.ELECTRIC:
+        # Estimate savings from switching to an electric vehicle.
+        current = car_km_year * factors.CAR_FACTORS_PER_KM[t.car_fuel]
+        electric = car_km_year * factors.CAR_FACTORS_PER_KM[factors.CarFuel.ELECTRIC]
+        saving = round(current - electric, 2)
+        if saving > 0:
+            return Recommendation(
+                category="transport",
+                action="Shift short car trips to walking, cycling or public transit, and "
+                "consider an electric vehicle for the rest.",
+                estimated_annual_savings_kg=saving,
+            )
+    if amount > 0:
+        return Recommendation(
+            category="transport",
+            action="Carpool or use public transit for routine journeys to cut transport emissions.",
+            estimated_annual_savings_kg=round(_GENERIC_TRANSPORT_REDUCTION_SHARE * amount, 2),
+        )
+    return None
+
+
+def _home_recommendation(amount: float) -> Recommendation | None:
+    """Build a home energy recommendation if emissions are non-zero."""
+    if amount <= 0:
+        return None
+    return Recommendation(
+        category="home",
+        action="Switch to a renewable electricity tariff and improve insulation/thermostat "
+        "settings to cut roughly a third of home energy emissions.",
+        estimated_annual_savings_kg=round(_HOME_ENERGY_REDUCTION_SHARE * amount, 2),
+    )
+
+
+def _diet_recommendation(data: CarbonInput) -> Recommendation | None:
+    """Suggest stepping one rung down the diet ladder if possible."""
+    current = data.diet
+    idx = _DIET_LADDER.index(current)
+    if idx >= len(_DIET_LADDER) - 1:
+        return None  # already at the greenest option
+    target = _DIET_LADDER[idx + 1]
+    saving = round(factors.DIET_ANNUAL_KG[current] - factors.DIET_ANNUAL_KG[target], 2)
+    if saving <= 0:
+        return None
+    return Recommendation(
+        category="diet",
+        action=f"Shift toward a {target.value.replace('_', ' ')} diet — even a few plant-based "
+        "days each week meaningfully lowers food emissions.",
+        estimated_annual_savings_kg=saving,
+    )
+
+
+def _consumption_recommendation(amount: float) -> Recommendation | None:
+    """Build a consumption recommendation if emissions are non-zero."""
+    if amount <= 0:
+        return None
+    return Recommendation(
+        category="consumption",
+        action="Buy less and choose durable, second-hand or repairable goods, and reduce "
+        "landfill waste by recycling and composting.",
+        estimated_annual_savings_kg=round(_CONSUMPTION_REDUCTION_SHARE * amount, 2),
+    )
+
+
+def generate_rule_based_insights(data: CarbonInput, result: FootprintResult) -> InsightsResponse:
+    """Produce ranked, quantified recommendations from the footprint breakdown."""
+    builders = {
+        "transport": lambda amt: _transport_recommendation(data, amt),
+        "home": _home_recommendation,
+        "diet": lambda _amt: _diet_recommendation(data),
+        "consumption": _consumption_recommendation,
+    }
+
+    # Sort categories by emission size (largest first) to prioritise impact.
+    ranked = sorted(result.breakdown_kg.items(), key=lambda kv: kv[1], reverse=True)
+
+    recommendations: list[Recommendation] = []
+    for category, amount in ranked:
+        rec = builders[category](amount)
+        if rec is not None:
+            recommendations.append(rec)
+
+    total = result.total_annual_kg
+    target = factors.SUSTAINABLE_TARGET_ANNUAL_KG
+    if total <= target:
+        summary = (
+            f"Your estimated footprint is {result.total_annual_tonnes} t CO2e/yr — at or below "
+            f"the sustainable target of {target / 1000:.1f} t. Keep it up, and lock in these habits."
+        )
+    else:
+        over = round((total - target) / 1000, 2)
+        summary = (
+            f"Your estimated footprint is {result.total_annual_tonnes} t CO2e/yr, about {over} t "
+            f"above the sustainable target of {target / 1000:.1f} t. The actions below target your "
+            "biggest sources first for the fastest reductions."
+        )
+
+    return InsightsResponse(
+        summary=summary,
+        recommendations=recommendations[:4],
+        source="rules",
+    )
