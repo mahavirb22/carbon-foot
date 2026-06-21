@@ -74,3 +74,16 @@ def test_security_headers_present(client):
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
     assert resp.headers["X-Frame-Options"] == "DENY"
     assert "Content-Security-Policy" in resp.headers
+
+
+def test_vercel_path_rewriter_via_header(client):
+    resp = client.post(
+        "/calculate",
+        json={
+            "transport": {"car_km_per_week": 100, "car_fuel": "petrol"},
+            "diet": "vegan",
+        },
+        headers={"x-vercel-id": "test-deployment-id"},
+    )
+    assert resp.status_code == 200
+

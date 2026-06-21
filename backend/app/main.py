@@ -88,15 +88,37 @@ class VercelPathRewriterMiddleware:
         if scope["type"] == "http":
             import os
             path = scope.get("path", "")
-            if os.environ.get("VERCEL") and not path.startswith("/api"):
+            # Check either the VERCEL env var or Vercel request headers (important for Services mode)
+            is_vercel = os.environ.get("VERCEL") or any(
+                h[0] == b"x-vercel-id" for h in scope.get("headers", [])
+            )
+            if is_vercel and not path.startswith("/api"):
                 scope["path"] = f"/api{path}"
                 if "raw_path" in scope:
                     scope["raw_path"] = b"/api" + scope["raw_path"]
         await self.app(scope, receive, send)
 
 
+def _setup_gcp_credentials() -> None:
+    """Write GOOGLE_CREDENTIALS_JSON to a temp file and set GOOGLE_APPLICATION_CREDENTIALS."""
+    import os
+    import tempfile
+
+    gcp_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    if gcp_json:
+        try:
+            temp_dir = tempfile.gettempdir()
+            key_path = os.path.join(temp_dir, "gcp_service_account_key.json")
+            with open(key_path, "w", encoding="utf-8") as f:
+                f.write(gcp_json)
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
+        except Exception as e:
+            print(f"Error setting up GCP credentials from env var: {e}", file=sys.stderr)
+
+
 def create_app() -> FastAPI:
     """Build the FastAPI application: middleware, routers, and SPA mount."""
+    _setup_gcp_credentials()
     _configure_logging()
     settings = get_settings()
     app = FastAPI(
