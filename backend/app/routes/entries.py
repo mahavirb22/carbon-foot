@@ -8,7 +8,7 @@ from app.deps import get_repository
 from app.models import Entry, EntryCreate
 from app.repository.base import EntryRepository
 
-router = APIRouter(prefix="/api/entries", tags=["entries"])
+router = APIRouter(prefix="/entries", tags=["entries"])
 
 _DEVICE_ID = Path(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
 

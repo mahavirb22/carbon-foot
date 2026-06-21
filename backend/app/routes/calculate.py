@@ -8,7 +8,7 @@ from app.insights.gemini import generate_insights
 from app.models import CarbonInput, FootprintResult, InsightsResponse
 from app.rate_limit import limiter
 
-router = APIRouter(prefix="/api", tags=["footprint"])
+router = APIRouter(tags=["footprint"])
 
 
 @router.post("/calculate", response_model=FootprintResult)

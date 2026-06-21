@@ -10,14 +10,18 @@ from __future__ import annotations
 
 import logging
 import sys
+import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-# Add backend directory to sys.path so 'app' package is importable when running directly
-backend_dir = Path(__file__).resolve().parent.parent
-if str(backend_dir) not in sys.path:
-    sys.path.insert(0, str(backend_dir))
-
+# Vercel deployment workaround for Google Cloud credentials.
+# Vercel cannot easily store files for environment variables, so we
+# read the JSON string and write it to /tmp.
+gcp_json = os.environ.get("GOOGLE_CREDENTIALS_JSON") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+if gcp_json and gcp_json.strip().startswith("{"):
+    with open("/tmp/gcp_key.json", "w") as f:
+        f.write(gcp_json)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp_key.json"
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -72,53 +76,8 @@ def _configure_logging() -> None:
     root.setLevel(logging.INFO)
 
 
-
-class VercelPathRewriterMiddleware:
-    """ASGI middleware to prepend '/api' to paths on Vercel.
-
-    Vercel Services routePrefix '/api' strips the prefix before forwarding
-    requests to the backend. This middleware restores the '/api' prefix so
-    FastAPI's routers (which expect '/api') match correctly.
-    """
-
-    def __init__(self, app: FastAPI) -> None:
-        self.app = app
-
-    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
-        if scope["type"] == "http":
-            import os
-            path = scope.get("path", "")
-            # Check either the VERCEL env var or Vercel request headers (important for Services mode)
-            is_vercel = os.environ.get("VERCEL") or any(
-                h[0] == b"x-vercel-id" for h in scope.get("headers", [])
-            )
-            if is_vercel and not path.startswith("/api"):
-                scope["path"] = f"/api{path}"
-                if "raw_path" in scope:
-                    scope["raw_path"] = b"/api" + scope["raw_path"]
-        await self.app(scope, receive, send)
-
-
-def _setup_gcp_credentials() -> None:
-    """Write GOOGLE_CREDENTIALS_JSON to a temp file and set GOOGLE_APPLICATION_CREDENTIALS."""
-    import os
-    import tempfile
-
-    gcp_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if gcp_json:
-        try:
-            temp_dir = tempfile.gettempdir()
-            key_path = os.path.join(temp_dir, "gcp_service_account_key.json")
-            with open(key_path, "w", encoding="utf-8") as f:
-                f.write(gcp_json)
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
-        except Exception as e:
-            print(f"Error setting up GCP credentials from env var: {e}", file=sys.stderr)
-
-
 def create_app() -> FastAPI:
     """Build the FastAPI application: middleware, routers, and SPA mount."""
-    _setup_gcp_credentials()
     _configure_logging()
     settings = get_settings()
     app = FastAPI(
@@ -197,12 +156,15 @@ def create_app() -> FastAPI:
                 )
         return await call_next(request)
 
-    # API routes.
+    # API routes (standard /api prefix for local dev and Docker container)
+    app.include_router(health.router, prefix="/api")
+    app.include_router(calculate.router, prefix="/api")
+    app.include_router(entries.router, prefix="/api")
+
+    # Fallback routes (no prefix, supporting Vercel experimentalServices strip-prefix)
     app.include_router(health.router)
     app.include_router(calculate.router)
     app.include_router(entries.router)
-
-    app.add_middleware(VercelPathRewriterMiddleware)
 
     _mount_spa(app)
     return app
